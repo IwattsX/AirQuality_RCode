@@ -1,0 +1,147 @@
+---
+title: 'CLSE: Comparison with Varin2006 and LiLu2022'
+author: "Mo Li"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Parameter estimator
+
+Let $\theta$ be a vector containing all parameters in the AOP(1) model. The conditional least squares (CLS) estimator of $\mathbf{\theta}$, denoted by $\mathbf{\hat{\theta}}$  minimizes the sum of squares in
+\begin{equation}
+\label{eqnSSE}
+Q(\mathbf{\theta}):=\sum_{t=1}^{n}\sum_{k=1}^{K} (Y_{t,k}-\mathbb{E}[Y_{t,k}|Y_{\{t-1\}}, \mathbf{\theta}])^2,
+\end{equation}
+\noindent where $\mathbb{E}[Y_{t,k}|Y_{\{t-1\}},\theta]$ is the conditional expectation of $Y_{t,k}$ given the past values $Y_{\{t-1\}}= \{Y_{t-1}, \ldots, Y_{1}\}$. It is the best mean squared error (MSE) predictor of $Y_{t,k}$ from $Y_{\{t-1\}}$, and can be obtained by
+\begin{flalign}\label{g_form}
+  \mathbb{E}[Y_{t,k}|Y_{\{t-1\}},\mathbf{\theta}] \notag &= P(Y_{t}=k|Y_{\{t-1\}}, \mathbf{\theta}) \\ 
+                       \notag &= P(Z_{t}\in B_{k}|Z_{\{t-1\}}\in B_{Y_{\{t-1\}}})\\
+                       &= \frac{P(Z_{t}\in B_{k} \cap Z_{t-1}\in B_{y_{t-1}} \cap ... \cap Z_{1}\in B_{y_{1}})}{P(Z_{t-1}\in B_{y_{t-1}} \cap ... \cap Z_{1}\in B_{y_{1}})}
+\end{flalign}
+The evaluation of this conditional expectation requires calculating a $t$-dimensional Gaussian integral, which can be very difficult and time-consuming, even for moderate $t$. Note that the latent process $\{Z_t\}$ is Gaussian, so the best MSE predictor of $Z_t$ is equivalent to its best linear predictor. Although the categorized variable $Y_t$ is not Gaussian, the linear prediction of $Y_t$ would still be a reasonably good approximation of $\mathbb{E}[Y_{t,k}|Y_{\{t-1\}},\mathbf{\theta}]$. 
+
+Here, we consider $\mathbb{E}[Y_{t,k}|Y_{t-1},\mathbf{\theta}]$, the conditional expectation of $Y_{t,k}$ given only the most recent past value, $Y_{t-1}$, to approximate $\mathbb{E}[Y_{t,k}|Y_{\{t-1\}},\mathbf{\theta}]$ in the CLS formula.
+
+### data simulation function
+
+```{r code1}
+rm(list = ls())
+
+options("scipen"=10) # show all digits
+
+library(mvtnorm)
+library(Rcpp)
+library(RcppArmadillo)
+library(foreach)
+library(doMC)
+
+sourceCpp("../tools/tmpVarin2006.cpp")
+
+##### data simulation
+Varin2006Sim <- function(ci, theta, rho, Ts, K, myseed=NULL){
+  
+  Ts <- Ts + 100 # first 100 observations will be dropped
+  len_par <- length(par)
+  
+  ci   <- c(0, ci)
+  
+  if(!is.null(myseed)){set.seed(myseed)}
+  
+  B0 <- rep(1, Ts)
+  B1 <- rnorm(Ts, mean=-1,    sd=1)
+  B2 <- rnorm(Ts, mean=-0.25, sd=sqrt(0.0324))
+  DesignXT <- cbind(B0, B1, B2)
+  mu <- DesignXT%*%theta
+  
+  yt <- rep(0, Ts)
+  yt[1] <- 0
+  eps <- rnorm(Ts, mean=0, sd=1)
+  for(t in 2:(length(yt)-1)){
+    yt[t] <- mu[t] + rho*yt[t-1] + eps[t]
+  }
+  
+  clip <- function(X=NULL){return(length(which(X>ci))+1)}
+  
+  # vector form
+  X_hour <- sapply(X=as.vector(yt), FUN = clip)
+  # matrix form
+  X_hour_wide <- matrix(0, nrow=Ts, ncol=K)
+  for (h in 1:Ts) {X_hour_wide[h,X_hour[h]] <- 1}
+  
+  # delete frist 100 observations and list outputs
+  res_sim <- list(DesignXT=DesignXT[101:Ts,], yt=yt[101:Ts], 
+                  X_hour=X_hour[101:Ts], X_hour_wide=X_hour_wide[101:Ts,])
+  return(res_sim)
+}
+```
+
+### Single simulation investigation
+
+```{r code2}
+myseed = 12345
+
+Ts = 500
+
+# Model: Varion and Vidoni (2006)
+K = 7
+ciT = c(1.2, 2.2, 3.1, 4.1, 5.3)
+thetaT = c(2.9, -0.6,  9)
+names(thetaT) = c("beta0", "beta1", "beta2")
+rhoT = 0.5
+
+parT = c(ciT, thetaT, rhoT)
+
+res_Varin2006Sim = Varin2006Sim(ci=ciT, theta=thetaT, rho=rhoT, Ts=Ts, K=K, 
+                                myseed=12345)
+res_sim <- list(Z           = res_Varin2006Sim$yt, 
+                X_hour      = res_Varin2006Sim$X_hour,
+                X_hour_wide = res_Varin2006Sim$X_hour_wide)
+
+DesignXT <- res_Varin2006Sim$DesignXT
+X_hour <- res_sim$X_hour
+X_hour_wide <- res_sim$X_hour_wide
+
+
+#------------------- Parameter Estimation   ------------------------#
+## initial value calculation
+cout = summary(as.factor(X_hour))
+ci_initial = as.vector(qnorm(cumsum(cout/sum(cout))))[1:(K-1)]
+p <- which(!is.finite(ci_initial))
+if(length(p)!=0){
+  if(p==1){
+    ci_initial[p] <- -6
+  }else{
+    ci_initial[p] <-  6
+  }
+}
+phi_initial = pacf(X_hour, plot = F)$acf[1]
+par_initial = c(ci_initial[2:length(ci_initial)] - ci_initial[1], -ci_initial[1], 
+                rep(0, NCOL(DesignXT)-1), phi_initial)
+## parameter constraints
+constrLSE = matrix(0, nrow=K, ncol=length(par_initial))
+constrLSE[1,1] = 1
+for(ii in 1:(K-3)){constrLSE[ii+1,c(ii, ii+1)] <- c(-1,1)} # ci
+constrLSE[(K-1):K,length(par_initial)] = c(1, -1)
+constrLSE_ci = c(rep(0,K-2), -1, -1)
+
+
+## optimization comparison
+
+Optim2 = constrOptim(par_initial, f=LSE_cpp1,
+                     method = "Nelder-Mead", ui=constrLSE,
+                     ci=constrLSE_ci, hessian=F,
+                     control= list(reltol=1e-04),
+                     X=X_hour_wide, DesignX=DesignXT)
+Optim2
+
+Optim3 = constrOptim(par_initial, f=LSE_cpp3,
+                     method = "Nelder-Mead", ui=constrLSE,
+                     ci=constrLSE_ci, hessian=F,
+                     control= list(reltol=1e-04),
+                     Xl=X_hour, X=X_hour_wide, DesignX=DesignXT)
+Optim3
+```

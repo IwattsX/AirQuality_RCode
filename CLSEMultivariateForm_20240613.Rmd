@@ -1,0 +1,388 @@
+---
+title: "Conditional Least Square Estimator on Multivariate form"
+author: "Mo Li"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Parameter estimator
+
+Let $\theta$ be a vector containing all parameters in the AOP(1) model. The conditional least squares (CLS) estimator of $\mathbf{\theta}$, denoted by $\mathbf{\hat{\theta}}$  minimizes the sum of squares in
+\begin{equation}
+\label{eqnSSE}
+Q(\mathbf{\theta}):=\sum_{t=1}^{n}\sum_{k=1}^{K} (Y_{t,k}-\mathbb{E}[Y_{t,k}|Y_{\{t-1\}}, \mathbf{\theta}])^2,
+\end{equation}
+\noindent where $\mathbb{E}[Y_{t,k}|Y_{\{t-1\}},\theta]$ is the conditional expectation of $Y_{t,k}$ given the past values $Y_{\{t-1\}}= \{Y_{t-1}, \ldots, Y_{1}\}$. It is the best mean squared error (MSE) predictor of $Y_{t,k}$ from $Y_{\{t-1\}}$, and can be obtained by
+\begin{flalign}\label{g_form}
+  \mathbb{E}[Y_{t,k}|Y_{\{t-1\}},\mathbf{\theta}] \notag &= P(Y_{t}=k|Y_{\{t-1\}}, \mathbf{\theta}) \\ 
+                       \notag &= P(Z_{t}\in B_{k}|Z_{\{t-1\}}\in B_{Y_{\{t-1\}}})\\
+                       &= \frac{P(Z_{t}\in B_{k} \cap Z_{t-1}\in B_{y_{t-1}} \cap ... \cap Z_{1}\in B_{y_{1}})}{P(Z_{t-1}\in B_{y_{t-1}} \cap ... \cap Z_{1}\in B_{y_{1}})}
+\end{flalign}
+The evaluation of this conditional expectation requires calculating a $t$-dimensional Gaussian integral, which can be very difficult and time-consuming, even for moderate $t$. Note that the latent process $\{Z_t\}$ is Gaussian, so the best MSE predictor of $Z_t$ is equivalent to its best linear predictor. Although the categorized variable $Y_t$ is not Gaussian, the linear prediction of $Y_t$ would still be a reasonably good approximation of $\mathbb{E}[Y_{t,k}|Y_{\{t-1\}},\mathbf{\theta}]$. 
+
+Here, we consider $\mathbb{E}[Y_{t,k}|Y_{t-1},\mathbf{\theta}]$, the conditional expectation of $Y_{t,k}$ given only the most recent past value, $Y_{t-1}$, to approximate $\mathbb{E}[Y_{t,k}|Y_{\{t-1\}},\mathbf{\theta}]$ in the CLS formula.
+
+### data simulation function
+
+```{r code1}
+rm(list = ls())
+
+options("scipen"=10) # show all digits
+
+library(mvtnorm)
+library(Rcpp)
+library(RcppArmadillo)
+library(foreach)
+library(doMC)
+
+##### data simulation
+ClipSimulation = function(ci, theta, rho, K, Ts, DesignX, seed=NULL){
+  
+  if(length(ci) != K-2){stop("Number of cut points and categories NOT match!!!")}
+  if(length(theta) != NCOL(DesignX)){stop("Number of Design Matrix columns and coefficients NOT match!!!")}
+  
+  len_par = length(ci) + length(theta) + length(rho)
+  
+  if(!is.null(seed)){set.seed(seed)}
+  mst = DesignX%*%theta
+  et = arima.sim(n=Ts, list(ar=rho), sd=sqrt(1-rho^2)) # sd argument is for WN
+  Z = et + mst
+  
+  ci2 = c(0, ci) # c1 = 0
+  clip = function(X=NULL){return(length(which(X>ci2))+1)}
+  X_hour = sapply(X=as.vector(Z), FUN = clip)
+  
+  X_hour_wide = matrix(0, nrow=Ts, ncol=K)
+  for (h in 1:Ts) {X_hour_wide[h,X_hour[h]] = 1}
+  
+  res = list(Z, X_hour, X_hour_wide, DesignX)
+  names(res) = c("Z", "X_hour", "X_hour_wide", "DesignX")
+  
+  return(res)
+}
+```
+
+### Conditional least square for multivariate form objective function
+
+```{r code2}
+AopCLSW = function(par, Xl, Xw, DesignX, lag=1){
+  
+  Ts = length(Xl)
+  K = NCOL(Xw)
+  
+  num_par = length(par)
+  
+  seg = c(-Inf, 0, par[1:(K-2)], Inf)
+  theta = par[(K-1):(num_par-1)]
+  rho = par[num_par]
+  
+  # mean vector
+  mst = DesignX%*%theta
+  CondEX = matrix(0, nrow=Ts, ncol=K)
+  
+  # t = 1 (using marginal expectation)
+  tmpprob = pnorm(seg[2:(K+1)]-mst[1]) - pnorm(seg[1:K]-mst[1])
+  CondEX[1,] = tmpprob
+  
+  # t = 2 (using conditonal expectation with lag=1)
+  corr_nom = rho^abs(matrix(1:2 - 1, nrow = 2, ncol = 2, byrow = TRUE) - (1:2 - 1))
+  diag(corr_nom) = 1
+  prevX = Xl[1]
+  denom = pnorm(seg[prevX+1]-mst[1]) - pnorm(seg[prevX]-mst[1])
+  mu_nom = mst[2:1]
+  for(k in 1:K){
+    a_nom = seg[c(k, prevX)]
+    b_nom = seg[c(k, prevX)+1]
+    nom = pmvnorm(lower=a_nom, upper=b_nom, mean=mu_nom, corr=corr_nom)
+    CondEX[2,k] = nom/denom
+  }
+  
+  # t > 2 (using conditonal expectation with lag)
+  for(t in 3:Ts){
+    if(t<=lag){
+      # 2 < t <= lag
+      corr_nom = rho^abs(matrix(1:t-1, nrow=t, ncol=t, byrow=TRUE) - (1:t - 1))
+      diag(corr_nom) = 1
+      corr_denom = rho^abs(matrix(1:(t-1)-1, nrow=t-1, ncol=t-1, byrow = TRUE) - (1:(t-1) - 1))
+      diag(corr_denom) = 1
+      
+      prevID = 1:(t-1)
+      prevX = Xl[prevID]
+      a_denom = seg[prevX]
+      b_denom = seg[prevX+1]
+      mu_denom = mst[prevID]
+      denom = pmvnorm(lower=a_denom, upper=b_denom, mean=mu_denom, corr=corr_denom)
+      
+      currID = 1:t
+      mu_nom = mst[currID]
+      
+      for(k in 1:K){
+        a_nom = seg[c(k, prevX)]
+        b_nom = seg[c(k, prevX)+1]
+        nom = pmvnorm(lower=a_nom, upper=b_nom, mean=mu_nom, corr=corr_nom)
+        CondEX[t,k] = nom/denom
+      }
+    }else{
+      # t > lag (using conditional expectation)
+      corr_nom = rho^abs(matrix(1:(lag+1) - 1, nrow = (lag+1), ncol = (lag+1), byrow = TRUE) - (1:(lag+1) - 1))
+      diag(corr_nom) = 1
+      corr_denom = rho^abs(matrix(1:lag - 1, nrow = lag, ncol = lag, byrow = TRUE) - (1:lag - 1))
+      diag(corr_denom) = 1
+      prevID = (t-1):(t-lag)
+      prevX = Xl[prevID]
+      a_denom = seg[prevX]
+      b_denom = seg[prevX+1]
+      mu_denom = mst[prevID]
+      if(lag<2){
+        denom = pnorm(b_denom-mu_denom) - pnorm(a_denom-mu_denom)
+      }else{
+        denom = pmvnorm(lower=a_denom, upper=b_denom, mean=mu_denom, corr=corr_denom)  
+      }
+      
+      currID = t:(t-lag)
+      mu_nom = mst[currID]
+      for(k in 1:K){
+        a_nom = seg[c(k, prevX)]
+        b_nom = seg[c(k, prevX)+1]
+        nom = pmvnorm(lower=a_nom, upper=b_nom, mean=mu_nom, corr=corr_nom)
+        CondEX[t,k] = nom/denom
+      }
+    }
+  }
+  
+  Q = sum((Xw - CondEX)^2)
+  
+  # cat("\n ===============")
+  # cat("\n par =", par)
+  # cat("\n Q =", Q)
+  return(Q)
+}
+```
+
+
+### Conditional least square for univariate form objective function
+
+```{r code3}
+AopCLSL = function(par, Xl, DesignX){
+  
+  Ts = length(Xl)
+  K = nlevels(factor(Xl))
+  
+  num_par = length(par)
+  
+  seg = c(-Inf, 0, par[1:(K-2)], Inf)
+  theta = par[(K-1):(num_par-1)]
+  rho = par[num_par]
+  
+  # mean vector
+  mst = DesignX%*%theta
+  CondEX = rep(0, Ts)
+  
+  # t = 1 (using marginal expectation)
+  tmpprob = pnorm(seg[2:(K+1)]-mst[1]) - pnorm(seg[1:K]-mst[1])
+  CondEX[1] = sum(tmpprob*(1:K))
+  
+  # t > 2 (using conditional expectation) !!! only lag 1 now !!!
+  corr_nom = rho^abs(matrix(1:2 - 1, nrow = 2, ncol = 2, byrow = TRUE) - (1:2 - 1))
+  diag(corr_nom) = 1
+  for(t in 2:Ts){
+    prevX = Xl[t-1]
+    denom = pnorm(seg[prevX+1]-mst[t-1]) - pnorm(seg[prevX]-mst[t-1])
+    mu_nom = mst[t:(t-1)]
+    for(k in 1:K){
+      a_nom = seg[c(k, prevX)]
+      b_nom = seg[c(k, prevX)+1]
+      nom = pmvnorm(lower=a_nom, upper=b_nom, mean=mu_nom, corr=corr_nom)
+      CondEX[t] = CondEX[t] + k*nom/denom
+    }
+  }
+  
+  Q = sum((Xl - CondEX)^2)
+  
+  # cat("\n par =", par)
+  return(Q)
+}
+```
+
+### Single simulation investigation
+
+Starting from simplest case, we have $K=3$ categories and the parameter settings are in the below.
+
+```{r code4}
+myseed = 12345
+
+##### Main scripts Start from here
+Ts = 500
+
+K = 3
+ciT = 0.8615
+thetaT = 0.43075
+names(thetaT) = c("beta0")
+rhoT = 0.5
+parT = c(ciT, thetaT, rhoT)
+
+DesignXT = matrix(1, nrow=Ts, ncol=1)
+colnames(DesignXT) = "Intercept"
+
+# data simulation
+resSim = ClipSimulation(ci=ciT, theta=thetaT, rho=rhoT, K=K, Ts=Ts, DesignX=DesignXT, seed=myseed)
+Z = resSim$Z
+X_hour = resSim$X_hour
+X_hour_wide = resSim$X_hour_wide
+DesignXT = resSim$DesignX
+
+#------------------- Parameter Estimation   ------------------------#
+## initial value calculation
+cout = summary(as.factor(X_hour))
+ci_initial = as.vector(qnorm(cumsum(cout/sum(cout))))[1:(K-1)]
+p <- which(!is.finite(ci_initial))
+if(length(p)!=0){
+  if(p==1){
+    ci_initial[p] <- -6
+  }else{
+    ci_initial[p] <-  6
+  }
+}
+phi_initial = pacf(X_hour, plot = F)$acf[1]
+par_initial = c(ci_initial[2:length(ci_initial)] - ci_initial[1], -ci_initial[1], 
+                    rep(0, NCOL(DesignXT)-1), phi_initial)
+## parameter constraints
+constrLSE = matrix(0, nrow=K, ncol=length(par_initial))
+constrLSE[1,1] = 1
+# for(ii in 1:(K-3)){constrLSE[ii+1,c(ii, ii+1)] <- c(-1,1)} # ci
+constrLSE[(K-1):K,length(par_initial)] = c(1, -1)
+constrLSE_ci = c(rep(0,K-2), -1, -1)
+
+## optimization comparison
+OptimW = constrOptim(par_initial, f=AopCLSW,
+                     method = "Nelder-Mead", ui=constrLSE,
+                     ci=constrLSE_ci, hessian=F,
+                     control= list(reltol=1e-05),
+                     Xl=X_hour, Xw=X_hour_wide, DesignX=DesignXT)
+OptimW
+
+OptimL = constrOptim(par_initial, f=AopCLSL,
+                     method = "Nelder-Mead", ui=constrLSE,
+                     ci=constrLSE_ci, hessian=F,
+                     control= list(reltol=1e-05),
+                     Xl=X_hour, DesignX=DesignXT)
+OptimL
+
+```
+
+Multiple simulations
+
+```{r code5}
+nSim = 200
+resL = matrix(0, nrow=nSim, ncol=3)
+resWlag1 = resWlag2 = resL
+resL_convg = matrix(0, nrow=nSim, ncol=2)
+resWlag1_convg = resWlag2_convg = resL_convg
+for(iii in 1:nSim){
+
+  # data simulation
+  resSim = ClipSimulation(ci=ciT, theta=thetaT, rho=rhoT, K=K, Ts=Ts, DesignX=DesignXT, seed=myseed+iii)
+  Z = resSim$Z
+  X_hour = resSim$X_hour
+  X_hour_wide = resSim$X_hour_wide
+
+  #------------------- Parameter Estimation   ------------------------#
+  ## initial value calculation
+  cout = summary(as.factor(X_hour))
+  ci_initial = as.vector(qnorm(cumsum(cout/sum(cout))))[1:(K-1)]
+  p <- which(!is.finite(ci_initial))
+  if(length(p)!=0){
+    if(p==1){
+      ci_initial[p] <- -6
+    }else{
+      ci_initial[p] <-  6
+    }
+  }
+  phi_initial = pacf(X_hour, plot = F)$acf[1]
+  par_initial = c(ci_initial[2:length(ci_initial)] - ci_initial[1], -ci_initial[1],
+                  rep(0, NCOL(DesignXT)-1), phi_initial)
+  ## parameter constraints
+  constrLSE = matrix(0, nrow=K, ncol=length(par_initial))
+  constrLSE[1,1] = 1
+  # for(ii in 1:(K-3)){constrLSE[ii+1,c(ii, ii+1)] <- c(-1,1)} # ci
+  constrLSE[(K-1):K,length(par_initial)] = c(1, -1)
+  constrLSE_ci = c(rep(0,K-2), -1, -1)
+
+  ## optimization
+  OptimW = constrOptim(par_initial, f=AopCLSW,
+                       method = "Nelder-Mead", ui=constrLSE,
+                       ci=constrLSE_ci, hessian=F,
+                       control= list(reltol=1e-05),
+                       Xl=X_hour, Xw=X_hour_wide, DesignX=DesignXT, lag=1)
+  resWlag1[iii,] = OptimW$par
+  resWlag1_convg[iii,] = c(OptimW$convergence, OptimW$counts[1])
+  
+  OptimW = constrOptim(par_initial, f=AopCLSW,
+                       method = "Nelder-Mead", ui=constrLSE,
+                       ci=constrLSE_ci, hessian=F,
+                       control= list(reltol=1e-05),
+                       Xl=X_hour, Xw=X_hour_wide, DesignX=DesignXT, lag=2)
+  resWlag2[iii,] = OptimW$par
+  resWlag2_convg[iii,] = c(OptimW$convergence, OptimW$counts[1])
+  
+  OptimL = constrOptim(par_initial, f=AopCLSL,
+                     method = "Nelder-Mead", ui=constrLSE,
+                     ci=constrLSE_ci, hessian=F,
+                     control= list(reltol=1e-05),
+                     Xl=X_hour, DesignX=DesignXT)
+  resL[iii,] = OptimL$par
+}
+```
+
+Summary of the comparison
+```{r code6}
+mySummary = matrix(NA, nrow=10, ncol=3)
+colnames(mySummary) = c("c2", "Intercept", "rho")
+rownames(mySummary) = c("TRUE", 
+                        "UEst", "UBias", "Usd",
+                        "MEstLag1", "MBiasLag1", "MsdLag1",
+                        "MEstLag2", "MBiasLag2", "MsdLag2")
+mySummary[1,] = parT
+mySummary[2,] = colMeans(resL)
+mySummary[3,] = colMeans(resL) - parT
+mySummary[4,] = apply(resL, 2, sd)
+mySummary[5,] = colMeans(resWlag1)
+mySummary[6,] = colMeans(resWlag1) - parT
+mySummary[7,] = apply(resWlag1, 2, sd)
+mySummary[8,] = colMeans(resWlag2)
+mySummary[9,] = colMeans(resWlag2) - parT
+mySummary[10,] = apply(resWlag2, 2, sd)
+mySummary
+```
+
+Histogram of the comparison
+```{r code7}
+myXLowB = apply(resL, 2, min) - 0.1
+myXUppB = apply(resL, 2, max) + 0.1
+par(mfrow=c(2,3))
+hist(resL[,1], xlim = c(myXLowB[1], myXUppB[1]))
+hist(resL[,2], xlim = c(myXLowB[2], myXUppB[2]))
+hist(resL[,3], xlim = c(myXLowB[3], myXUppB[3]))
+
+hist(resWlag1[,1], xlim = c(myXLowB[1], myXUppB[1]))
+hist(resWlag1[,2], xlim = c(myXLowB[2], myXUppB[2]))
+hist(resWlag1[,3], xlim = c(myXLowB[3], myXUppB[3]))
+
+hist(resWlag2[,1], xlim = c(myXLowB[1], myXUppB[1]))
+hist(resWlag2[,2], xlim = c(myXLowB[2], myXUppB[2]))
+hist(resWlag2[,3], xlim = c(myXLowB[3], myXUppB[3]))
+```
+Convergence check
+```{r code8}
+# convergence counts
+sum(1*(resWlag1_convg[,1] !=0))
+sum(1*(resWlag2_convg[,1] !=0))
+
+# average number function evaluation
+mean(resWlag1_convg[,2])
+mean(resWlag2_convg[,2])
+```
