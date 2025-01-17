@@ -5,6 +5,7 @@ install.packages("doMC")
 install.pacakges("covr")
 install.packages("Rcpp")
 install.packages("RcppArmadillo")
+install.packages("readxl")
 library(mvtnorm)
 library(Rcpp)
 library(RcppArmadillo)
@@ -16,7 +17,20 @@ sourceCpp("CLSTools.cpp")
 
 ##### data
 
-#y1t <- read.table("C:\\Users\\Ju Wang\\Downloads\\aqi file merger\\sortedCBSAdata\\sortedPhillyPADS.xlsx",header=T,col.names=c("A","B","C","D","E","F","G","H","I"))
+
+
+
+
+library(readxl)
+
+
+
+y1t <- read_excel("/home/iwatts/AirQuality_RCode/sortedPhillyPADS.xlsx")
+y1t
+colnames(y1t)
+
+dates = y1t[ 1:10, "D"]
+dates
 ClipSimulation = function(ci, theta, rho, K, Ts, DesignX, seed=NULL){
   
   if(length(ci) != K-2){stop("Number of cut points and categories NOT match!!!")}
