@@ -10,32 +10,71 @@ library(Rcpp)
 library(RcppArmadillo)
 library(foreach)
 library(doMC)
-
+library(readxl)
 
 sourceCpp("CLSTools.cpp")
 
 ##### data
 
-#y1t <- read.table("C:\\Users\\Ju Wang\\Downloads\\aqi file merger\\sortedCBSAdata\\sortedPhillyPADS.xlsx",header=T,col.names=c("A","B","C","D","E","F","G","H","I"))
-ClipSimulation = function(ci, theta, rho, K, Ts, DesignX, seed=NULL){
+y1t <-read_excel("C:\\Users\\Ju Wang\\Downloads\\aqi file merger\\sortedCBSAdata\\sortedPhillyPADS.xlsx")
+y1t
+colunm2 <-y1t[c(15886:16920),4]
+colunm1 <- y1t[c(15886:16920),6]
+
+############
+
+Givendata = function(ci, theta, rho, K, Ts, DesignX, seed=NULL) {
   
-  if(length(ci) != K-2){stop("Number of cut points and categories NOT match!!!")}
-  if(length(theta) != NCOL(DesignX)){stop("Number of Design Matrix columns and coefficients NOT match!!!")}
+  # Check the input parameters to ensure they match the expected structure
+  if(length(ci) != K-2) {
+    stop("Number of cut points and categories do NOT match!!!")
+  }
+  if(length(theta) != NCOL(DesignX)) {
+    stop("Number of Design Matrix columns and coefficients do NOT match!!!")
+  }
   
-  len_par = length(ci) + length(theta) + length(rho)
+  # If a seed is provided, set it for reproducibility
+  if(!is.null(seed)) {
+    set.seed(seed)
+  }
   
-  if(!is.null(seed)){set.seed(seed)}
-  mst = DesignX%*%theta
-  et = arima.sim(n=Ts, list(ar=rho), sd=sqrt(1-rho^2)) # sd argument is for WN
+  
+  ci <- quantile(DesignX$column1, probs = seq(0, 1, length.out = K-1))  
+  
+  
+  model <- lm(column1 ~ column2, data = DesignX)  # Linear Model
+  theta <- coef(model)[-1]  # may exclude intercept if not needed
+  
+  # `rho` -: correlation between AQI and day
+  rho <- cor(DesignX$column1, DesignX$column2)  
+  
+ 
+  
+  # Linear prediction part of the model
+  mst = DesignX %*% theta
+  
+  # Simulate AR(1) process
+  et = arima.sim(n = Ts, list(ar = rho), sd = sqrt(1 - rho^2))  # Generate autoregressive noise
+  
+  # Z is the sum of the linear prediction and the autoregressive noise
   Z = et + mst
   
-  ci2 = c(0, ci) # c1 = 0
-  clip = function(X=NULL){return(length(which(X>ci2))+1)}
-  X_hour = sapply(X=as.vector(Z), FUN = clip)
+  # Create a vector for categories based on ci (the cut points)
+  ci2 = c(0, ci)  # Add a 0 to the cut points vector to handle categorization
+  clip = function(X=NULL) {
+    return(length(which(X > ci2)) + 1)  # Assign category based on cut points
+  }
   
-  X_hour_wide = matrix(0, nrow=Ts, ncol=K)
-  for (h in 1:Ts) {X_hour_wide[h,X_hour[h]] = 1}
+  # Apply clipping function to the simulated values (Z)
+  X_hour = sapply(X = as.vector(Z), FUN = clip)
   
+  # Create a wide matrix representation for the categories
+  X_hour_wide = matrix(0, nrow = Ts, ncol = K)  # Initialize an empty matrix with Ts rows and K columns
+  for (h in 1:Ts) {
+    X_hour_wide[h, X_hour[h]] = 1  # the enbedding code uses hour and not day
+  }
+  
+  # Return a list of the results
   res = list(Z, X_hour, X_hour_wide)
   names(res) = c("Z", "X_hour", "X_hour_wide")
   
@@ -124,7 +163,7 @@ if(length(p)!=0){
     ci_initial[p] <-  6
   }
 }
-phi_initial = pacf(X_hour, plot = F)$acf[1]
+phi_initial = pacf(X_day, plot = F)$acf[1]
 par_initial = c(ci_initial[2:length(ci_initial)] - ci_initial[1], -ci_initial[1], 
                 rep(0, NCOL(DesignXT)-1), phi_initial)
 ## parameter constraints

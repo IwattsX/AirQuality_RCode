@@ -67,7 +67,7 @@ double KappLongRcpp(int ti, int tj, double mui, double muj, double EXi, double E
     for(j=0;j<K;j++){
       lb = {seg(i), seg(j)};
       ub = {seg(i+1), seg(j+1)};
-      prob = pmvnorm_cpp(lb, ub, mymu, correle, 1e-5);
+      prob = pmvnorm_cpp(lb, ub, mymu, correle, 1e-3);
       res += (i+1)*(j+1)*prob;
     }
   }

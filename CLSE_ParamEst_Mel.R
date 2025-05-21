@@ -14,9 +14,7 @@ library(doMC)
 
 sourceCpp("CLSTools.cpp")
 
-##### data
-
-#y1t <- read.table("C:\\Users\\Ju Wang\\Downloads\\aqi file merger\\sortedCBSAdata\\sortedPhillyPADS.xlsx",header=T,col.names=c("A","B","C","D","E","F","G","H","I"))
+##### data simulation
 ClipSimulation = function(ci, theta, rho, K, Ts, DesignX, seed=NULL){
   
   if(length(ci) != K-2){stop("Number of cut points and categories NOT match!!!")}
@@ -89,7 +87,7 @@ AopCLS = function(par, Xl, DesignX){
 
 ### Single simulation investigation
 
-#```{r code4}
+
 myseed = 12345 + 1
 
 ##### Main scripts Start from here
@@ -190,7 +188,7 @@ for(iii in 1:nSim){
   Z = resSim$Z
   X_hour = resSim$X_hour
   X_hour_wide = resSim$X_hour_wide
-  # DesignXT = resSim$DesignX
+ # DesignXT = resSim$DesignX
   
   #------------------- Parameter Estimation   ------------------------#
   ## initial value calculation
@@ -243,3 +241,5 @@ par(mfrow=c(1,3))
 hist(resL[,1], xlim = c(myXLowB[1], myXUppB[1]))
 hist(resL[,2], xlim = c(myXLowB[2], myXUppB[2]))
 hist(resL[,3], xlim = c(myXLowB[3], myXUppB[3]))
+
+
